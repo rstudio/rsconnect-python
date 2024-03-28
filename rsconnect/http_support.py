@@ -9,13 +9,12 @@ import json
 import os
 import socket
 import ssl
-from typing import Any, BinaryIO, Dict, List, Mapping, Optional, Tuple, Union
+from typing import Any, BinaryIO, Dict, List, Mapping, Optional, Tuple, Union, cast
 from warnings import warn
 
-from six.moves import http_client as http
-from six.moves.http_cookies import SimpleCookie
-from six.moves.urllib_parse import urlencode, urljoin, urlparse
-
+from http import client as http
+from http.cookies import SimpleCookie
+from urllib.parse import urlencode, urlparse, urljoin
 
 from . import VERSION
 from .log import logger
@@ -41,7 +40,7 @@ def _create_plain_connection(
     host_name: str,
     port: Optional[int],
     disable_tls_check: bool,
-    ca_data: Optional[str],
+    ca_data: Optional[str | bytes],
 ):
     """
     This function is used to create a plain HTTP connection.  Note that the 3rd and 4th
@@ -195,7 +194,12 @@ class HTTPResponse(object):
             self.status = response.status
             self.reason = response.reason
             self.content_type = response.getheader("Content-Type")
-            if self.content_type and self.content_type.startswith("application/json") and len(self.response_body) > 0:
+            if (
+                self.content_type
+                and self.content_type.startswith("application/json")
+                and self.response_body is not None
+                and len(self.response_body) > 0
+            ):
                 self.json_data = json.loads(self.response_body)
 
 
@@ -257,6 +261,9 @@ class HTTPServer(object):
         return append_to_path(self._url.path, path)
 
     def __enter__(self):
+        if self._url.hostname is None:
+            raise ValueError("The URL does not contain a hostname.")
+
         factory = _connection_factory[self._url.scheme]
         self._conn = factory(
             self._url.hostname,
@@ -266,7 +273,7 @@ class HTTPServer(object):
         )
         return self
 
-    def __exit__(self, *args):
+    def __exit__(self, *args: object):
         if self._conn is not None:
             self._conn.close()
             self._conn = None
@@ -276,33 +283,33 @@ class HTTPServer(object):
         path: str,
         query_params: Optional[Mapping[str, JsonData]] = None,
         decode_response: bool = True,
-    ):
+    ) -> JsonData | HTTPResponse:
         return self.request("GET", path, query_params, decode_response=decode_response)
 
     def post(
         self,
         path: str,
         query_params: Optional[Mapping[str, JsonData]] = None,
-        body: str | bytes | BinaryIO | dict[str, Any] | list[Any] | None = None,
-    ):
+        body: str | bytes | BinaryIO | Mapping[str, Any] | list[Any] | None = None,
+    ) -> JsonData | HTTPResponse:
         return self.request("POST", path, query_params, body)
 
     def patch(
         self,
         path: str,
         query_params: Optional[Mapping[str, JsonData]] = None,
-        body: str | bytes | BinaryIO | dict[str, Any] | list[Any] | None = None,
-    ):
+        body: str | bytes | BinaryIO | Mapping[str, Any] | list[Any] | None = None,
+    ) -> JsonData | HTTPResponse:
         return self.request("PATCH", path, query_params, body)
 
     def put(
         self,
         path: str,
         query_params: Optional[Mapping[str, JsonData]] = None,
-        body: str | bytes | BinaryIO | dict[str, Any] | list[Any] | None = None,
-        headers: Optional[dict[str, str]] = None,
+        body: str | bytes | BinaryIO | Mapping[str, Any] | list[Any] | None = None,
+        headers: Optional[Mapping[str, str]] = None,
         decode_response: bool = True,
-    ):
+    ) -> JsonData | HTTPResponse:
         if headers is None:
             headers = {}
         return self.request(
@@ -313,9 +320,9 @@ class HTTPServer(object):
         self,
         path: str,
         query_params: Optional[Mapping[str, JsonData]] = None,
-        body: str | bytes | BinaryIO | dict[str, Any] | list[Any] | None = None,
+        body: str | bytes | BinaryIO | Mapping[str, Any] | list[Any] | None = None,
         decode_response: bool = True,
-    ):
+    ) -> JsonData | HTTPResponse:
         return self.request("DELETE", path, query_params, body, decode_response=decode_response)
 
     def request(
@@ -323,14 +330,14 @@ class HTTPServer(object):
         method: str,
         path: str,
         query_params: Optional[Mapping[str, JsonData]] = None,
-        body: str | bytes | BinaryIO | dict[str, Any] | list[Any] | None = None,
+        body: str | bytes | BinaryIO | Mapping[str, Any] | list[Any] | None = None,
         maximum_redirects: int = 5,
         decode_response: bool = True,
-        headers: Optional[dict[str, str]] = None,
+        headers: Optional[Mapping[str, str]] = None,
     ) -> JsonData | HTTPResponse:
         path = self._get_full_path(path)
         extra_headers = headers or {}
-        if isinstance(body, (dict, list)):
+        if isinstance(body, (Mapping, list)):
             body = json.dumps(body).encode("utf-8")
             extra_headers = {"Content-Type": "application/json; charset=utf-8"}
         extra_headers = {**extra_headers, **self.get_extra_headers(path, method, body)}
@@ -346,7 +353,7 @@ class HTTPServer(object):
         query_params: Optional[Mapping[str, JsonData]],
         body: str | bytes | BinaryIO | None,
         maximum_redirects: int,
-        extra_headers: Optional[dict[str, str]] = None,
+        extra_headers: dict[str, str],
         decode_response: bool = True,
     ) -> JsonData | HTTPResponse:
         full_uri = path
@@ -372,10 +379,13 @@ class HTTPServer(object):
                 self.__enter__()
                 local_connection = True
 
-            try:
-                self._conn.request(method, full_uri, body, headers)  # type: ignore
+            # At this point we know that self._conn is not None.
+            conn = cast(http.HTTPConnection | http.HTTPSConnection, self._conn)
 
-                response = self._conn.getresponse()  # type: ignore
+            try:
+                conn.request(method, full_uri, body, headers)
+
+                response = conn.getresponse()
                 response_body = response.read()
                 if decode_response:
                     response_body = response_body.decode("utf-8").strip()
@@ -396,6 +406,9 @@ class HTTPServer(object):
                     raise http.CannotSendRequest("Too many redirects")
 
                 location = response.getheader("Location")
+
+                if location is None:
+                    raise http.CannotSendRequest("Redirect response missing Location header")
 
                 # Assume the redirect location will always be on the same domain.
                 if location.startswith("http"):

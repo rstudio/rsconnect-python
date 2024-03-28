@@ -8,7 +8,7 @@ import textwrap
 import traceback
 from functools import wraps
 from os.path import abspath, dirname, exists, isdir, join
-from typing import Callable, ItemsView, Literal, Optional, Sequence, TypeVar, cast
+from typing import Callable, ItemsView, Literal, Optional, Sequence, TypeVar
 
 import click
 
@@ -560,7 +560,6 @@ def add(
     old_server = server_store.get_by_name(name)
 
     if token:
-        real_server: api.PositServer  # This annotation seems to be necessary for mypy
         if server and ("rstudio.cloud" in server or "posit.cloud" in server):
             real_server = api.CloudServer(server, account, token, secret)
         else:
@@ -659,7 +658,7 @@ def details(
         return
 
     with cli_feedback("Gathering details"):
-        server_details = ce.server_details
+        server_details = ce.server_details()
 
     connect_version = server_details["connect"]
     apis_allowed = server_details["python"]["api_enabled"]
@@ -1485,7 +1484,7 @@ def generate_deploy_python(app_mode: AppMode, alias: str, min_version: str, desc
             environment = fix_starlette_requirements(
                 environment=environment,
                 app_mode=app_mode,
-                connect_version_string=cast(str, ce.client.server_settings()["version"]),
+                connect_version_string=ce.client.server_settings()["version"],
             )
 
         ce.validate_server()
